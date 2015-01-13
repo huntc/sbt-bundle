@@ -5,6 +5,7 @@ import java.nio.charset.Charset
 import java.security.MessageDigest
 
 import com.typesafe.sbt.SbtNativePackager
+import com.typesafe.sbt.packager.Stager
 import com.typesafe.sbt.packager.universal.Archives
 import sbt._
 import sbt.Keys._
@@ -77,34 +78,44 @@ object SbtBundle extends AutoPlugin {
     bundleType := Universal,
     startCommand := Seq((file("bin") / (executableScriptName in Universal).value).getPath),
     endpoints := Map("web" -> Endpoint("http", 9000)),
-    NativePackagerKeys.dist in Bundle := Def.taskDyn {
-      Def.task {
-        createDist(bundleType.value)
-      }.value
-    }.value,
     NativePackagerKeys.stage in Bundle := Def.taskDyn {
       Def.task {
         stageBundle(bundleType.value)
+      }.value
+    }.value,
+    NativePackagerKeys.dist in Bundle := Def.taskDyn {
+      Def.task {
+        createDist((NativePackagerKeys.stage in Bundle).value)
       }.value
     }.value,
     NativePackagerKeys.stagingDirectory in Bundle := (target in Bundle).value / "stage",
     target in Bundle := target.value / "typesafe-conductr"
   )
 
-  private def createDist(bundleTypeConfig: Configuration): Def.Initialize[Task[File]] = Def.task {
+  private def stageBundle(bundleTypeConfig: Configuration): Def.Initialize[Task[File]] = Def.task {
+    val bundleConfTarget = (target in Bundle).value
+    val bundleConfFile = writeConfig(bundleConfTarget, bundleConf.value)
+    val componentDir = (packageName in Universal).value + java.io.File.separator
+    val bundleMappings = (mappings in bundleTypeConfig).value.map(m => m._1 -> (componentDir + m._2)) ++
+      bundleConfFile.pair(relativeTo(bundleConfTarget))
+    val bundleName = (packageName in Universal).value
+    val stageDir = (NativePackagerKeys.stagingDirectory in Bundle).value
+    Stager.stage(Bundle.name)(streams.value, stageDir / bundleName, bundleMappings).getParentFile
+  }
+
+  private def createDist(stageDir: File): Def.Initialize[Task[File]] = Def.task {
+    val bundleName = (packageName in Universal).value
     val bundleTarget = (target in Bundle).value
-    val configTarget = bundleTarget / "tmp"
-    def relParent(p: (File, String)): (File, String) =
-      (p._1, (packageName in Universal).value + java.io.File.separator + p._2)
-    val configFile = writeConfig(configTarget, bundleConf.value)
-    val bundleMappings =
-      configFile.pair(relativeTo(configTarget)) ++ (mappings in bundleTypeConfig).value.map(relParent)
-    val tgz = Archives.makeTgz(bundleTarget, (packageName in Universal).value, bundleMappings)
+    val tgz = bundleTarget / (bundleName + ".tgz")
+    Process(Seq("tar", "-pvc", bundleName), Some(stageDir)) #| Process(Seq("gzip", "-n")) #> tgz ! match {
+      case 0 => ()
+      case n => sys.error("Error tarballing " + tgz + ". Exit code: " + n)
+    }
     val tgzName = tgz.getName
     val exti = tgzName.lastIndexOf('.')
     val hash = Hash.toHex(digestFile(tgz))
     val hashName = tgzName.take(exti) + "-" + hash + tgzName.drop(exti)
-    val hashTgz = tgz.getParentFile / hashName
+    val hashTgz = bundleTarget / hashName
     IO.move(tgz, hashTgz)
     hashTgz
   }
@@ -154,14 +165,6 @@ object SbtBundle extends AutoPlugin {
         |  }
         |}
         |""".stripMargin
-  }
-
-  private def stageBundle(bundleTypeConfig: Configuration): Def.Initialize[Task[File]] = Def.task {
-    val bundleTarget = (NativePackagerKeys.stagingDirectory in Bundle).value
-    writeConfig(bundleTarget, bundleConf.value)
-    val componentTarget = bundleTarget / (packageName in Universal).value
-    IO.copy((mappings in bundleTypeConfig).value.map(p => (p._1, componentTarget / p._2)))
-    componentTarget
   }
 
   private def writeConfig(target: File, contents: String): File = {

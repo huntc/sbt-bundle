@@ -1,3 +1,6 @@
 > bundle:dist
-
+> assertOneBundle
 > checkBundleConf
+
+> bundle:dist
+> assertOneBundle
